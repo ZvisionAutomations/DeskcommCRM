@@ -10,16 +10,26 @@
  * dias próprios na prospecção) → caps diários (warm-up por idade do número;
  * limite do CRM injetado) → throttle+jitter.
  */
-import type { PacingKnobs, WarmupStep } from './defaults';
+import {
+  FOLLOWUP_MULTIPLO_DO_WARMUP,
+  FOLLOWUP_TETO_FOLGADO_ATE_DIAS,
+  type PacingKnobs,
+  type WarmupStep,
+} from './defaults';
 
 export interface PacingState {
   /** Último envio deste número (qualquer dia) — base do throttle. */
   lastSentAt: Date | null;
   /**
-   * DISPAROS deste número desde a meia-noite LOCAL do tenant (1ª mensagem,
-   * follow-up, campanha). Resposta a quem escreveu não entra (`pacing_ledger.resposta`).
+   * 1ªs MENSAGENS deste número desde a meia-noite LOCAL do tenant (abordagem,
+   * campanha). Resposta (`pacing_ledger.resposta`) e follow-up (`retomada`) não entram.
    */
   sentToday: number;
+  /**
+   * FOLLOW-UPS deste número no mesmo dia local (`pacing_ledger.retomada`), contados
+   * à parte de `sentToday`. Omitido = 0 (chamador que não conhece o teto próprio).
+   */
+  followupsToday?: number;
   /** Ativação do número (channel_knobs.number_activated_at); null = idade 0 (conservador). */
   numberActivatedAt: Date | null;
 }
@@ -70,6 +80,18 @@ export interface PacingInput {
    * de prospecção continua como está.
    */
   prospeccao?: boolean;
+  /**
+   * Esta decisão é para um FOLLOW-UP (retomada de conversa que já existe)?
+   *
+   * Decisão do dono (30/10): o teto do dia (warm-up e limite do CRM) mede só a
+   * PRIMEIRA mensagem a uma pessoa nova. Follow-up tem teto PRÓPRIO, à parte —
+   * 3x o warm-up do dia enquanto o número tem menos de 15 dias, livre depois —
+   * e não gasta o saldo da 1ª mensagem. O espaçamento (throttle + jitter) e a
+   * janela de DISPARO (`window*`) continuam valendo, porque retomar não é
+   * responder. `prospeccao: true` prevalece: abordagem fria nunca é retomada.
+   * Omitir = disparo que conta, como sempre.
+   */
+  retomada?: boolean;
   /** [0,1) — injetável nos testes; default Math.random. */
   rng?: () => number;
 }
@@ -122,20 +144,47 @@ export function decidePacing(input: PacingInput): PacingDecision {
   // SEMPRE — desarmar as duas juntas acordaria cliente às 3h (invariante 3).
   if (!banRisk) return { allow: true, waitMs: 0 };
 
-  // RESPOSTA não passa pelo teto do dia. O teto (warm-up e limite do CRM) mede
-  // quantas pessoas o número ABORDA — 1ª mensagem e follow-up —, e é isso que
-  // leva a banimento. Quem escreveu está esperando: segurar a resposta até
-  // amanhã porque a prospecção do dia acabou perde o lead e não protege o
-  // número. Por isso a resposta também não entra na conta (`recordSend` grava
-  // `resposta`, `loadPacingState` só conta disparo). O espaçamento continua.
-  if (resposta) return { allow: true, waitMs: throttleWaitMs(now, state, knobs, rng) };
+  // RESPOSTA não passa por teto nenhum. O teto (warm-up e limite do CRM) mede
+  // quantas pessoas o número ABORDA, e é isso que leva a banimento. Quem escreveu
+  // está esperando: segurar a resposta até amanhã porque a prospecção do dia
+  // acabou perde o lead e não protege o número. Por isso a resposta também não
+  // entra na conta (`recordSend` grava `resposta`, `loadPacingState` só conta a
+  // 1ª mensagem). O espaçamento continua.
+  //
+  // `prospeccao` prevalece: abordagem fria nunca é resposta nem retomada, e um
+  // chamador que declare as duas coisas não abre o teto (antes, `resposta: true`
+  // com `prospeccao: true` pulava o teto).
+  if (!prospeccao && resposta) {
+    return { allow: true, waitMs: throttleWaitMs(now, state, knobs, rng) };
+  }
+
+  // FOLLOW-UP (decisão de 30/10): tem teto PRÓPRIO, contado à parte da 1ª mensagem
+  // (não gasta o dela e ela não gasta o dele), e só nos primeiros dias do número:
+  // 3x o warm-up do dia enquanto a idade for < 15 dias; dali em diante é livre.
+  // Throttle e janela de disparo valem sempre.
+  if (!prospeccao && input.retomada === true) {
+    const idade = idadeDoNumeroEmDias(now, state);
+    const teto = tetoDoFollowup(idade, knobs.warmupDailyCaps);
+    const feitos = state.followupsToday ?? 0;
+    if (teto !== null && feitos >= teto) {
+      const nextAllowedAt = addMs(nextDayOpen(now, knobs, null), jitterOf(rng, knobs));
+      return {
+        allow: false,
+        code: 'warmup_cap',
+        nextAllowedAt,
+        reason:
+          `teto de follow-up do warm-up atingido (${teto}/dia para número com ${idade} dia(s) de idade; ` +
+          `livre a partir do ${FOLLOWUP_TETO_FOLGADO_ATE_DIAS}º dia); ` +
+          `agende para ${formatInTz(nextAllowedAt, knobs.timezone)} (próxima abertura + jitter)`,
+      };
+    }
+    return { allow: true, waitMs: throttleWaitMs(now, state, knobs, rng) };
+  }
 
   // Clamp em >= 0: number_activated_at no futuro (typo do admin / clock skew
   // daemon↔DB) cai no degrau MAIS conservador — warm-up falha FECHADO, nunca
   // vira "número formado" por idade negativa.
-  const ageDays = state.numberActivatedAt
-    ? Math.max(0, Math.floor((now.getTime() - state.numberActivatedAt.getTime()) / DAY_MS))
-    : 0;
+  const ageDays = idadeDoNumeroEmDias(now, state);
   const wCap = warmupCapFor(ageDays, knobs.warmupDailyCaps);
   const effectiveCap = Math.min(wCap ?? Infinity, crmDailyLimit ?? Infinity);
   if (state.sentToday >= effectiveCap) {
@@ -154,6 +203,25 @@ export function decidePacing(input: PacingInput): PacingDecision {
   }
 
   return { allow: true, waitMs: throttleWaitMs(now, state, knobs, rng) };
+}
+
+/** Idade do número em dias inteiros, com clamp em >= 0 (ver o comentário no uso). */
+function idadeDoNumeroEmDias(now: Date, state: PacingState): number {
+  return state.numberActivatedAt
+    ? Math.max(0, Math.floor((now.getTime() - state.numberActivatedAt.getTime()) / DAY_MS))
+    : 0;
+}
+
+/**
+ * Teto diário do FOLLOW-UP para um número com `ageDays` de idade: 3x o degrau de
+ * warm-up do dia (20→60, 50→150, 100→300) enquanto o número tem menos de 15 dias;
+ * `null` = livre (do 15º dia em diante, ou degrau sem cap). Exportada para a
+ * tela e o lado do CRM usarem a MESMA regra.
+ */
+export function tetoDoFollowup(ageDays: number, steps: WarmupStep[]): number | null {
+  if (ageDays >= FOLLOWUP_TETO_FOLGADO_ATE_DIAS) return null;
+  const warmup = warmupCapFor(ageDays, steps);
+  return warmup === null ? null : warmup * FOLLOWUP_MULTIPLO_DO_WARMUP;
 }
 
 /** Espera restante do espaçamento (throttle + jitter) desde o último envio do número. */

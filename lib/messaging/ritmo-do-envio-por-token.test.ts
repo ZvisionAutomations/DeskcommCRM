@@ -2,13 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/types";
 import { CHANNEL_CAPABILITIES } from "@/lib/channels/capabilities";
-import type { DecisaoDeEspacamento } from "@/lib/agent-engine/pacing/ledger-supabase";
+import { PACING_DEFAULTS } from "@/lib/agent-engine/pacing/defaults";
+import {
+  decidirEspacamento,
+  type DecisaoDeEspacamento,
+} from "@/lib/agent-engine/pacing/ledger-supabase";
 
 import {
   ESPERA_MAXIMA_MS,
   registrarEnvioPorToken,
   segurarEnvioPorToken,
   type DepsDoRitmo,
+  type HistoricoDoAlvo,
 } from "./ritmo-do-envio-por-token";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
@@ -141,5 +146,146 @@ describe("registrarEnvioPorToken", () => {
     await registrarEnvioPorToken(d, ORG, { channelSessionId: SESSAO }, "failed");
     await registrarEnvioPorToken(d, ORG, null, "sent");
     expect(d.pacing.registraEnvio).not.toHaveBeenCalled();
+  });
+});
+
+describe("só a 1ª mensagem a pessoa nova gasta o teto do dia (30/10)", () => {
+  const CONTATO = "44444444-4444-4444-8444-444444444444";
+  const alvoDoContato = {
+    organizationId: ORG,
+    channelSessionId: SESSAO,
+    contactId: CONTATO,
+    requestId: "r",
+  };
+
+  // Pacing REAL (a regra de verdade), com os dois saldos do dia já batidos.
+  function comTetosBatidos(historico: HistoricoDoAlvo | "falha" | "ausente") {
+    const registra = vi.fn(async () => {});
+    const d: DepsDoRitmo = {
+      lerCanalDaConversa: vi.fn(async () => ({ channelSessionId: SESSAO, provider: COM_RISCO })),
+      lerCanalDaSessao: vi.fn(async () => ({ channelSessionId: SESSAO, provider: COM_RISCO })),
+      pacing: {
+        decide: async (_org, _sessao, agora, opcoes) =>
+          decidirEspacamento({
+            agora,
+            estado: { lastSentAt: null, sentToday: 20, followupsToday: 60, numberActivatedAt: null },
+            throttleMs: 1_200,
+            jitterMaxMs: 0,
+            timezone: "America/Sao_Paulo",
+            warmupDailyCaps: PACING_DEFAULTS.warmupDailyCaps,
+            crmDailyLimit: null,
+            foraDoTeto: opcoes?.foraDoTeto === true,
+            retomada: opcoes?.retomada === true,
+          }),
+        registraEnvio: registra,
+      },
+      ...(historico === "ausente"
+        ? {}
+        : {
+            historicoDoAlvo: vi.fn(async () => {
+              if (historico === "falha") throw new Error("banco fora");
+              return historico;
+            }),
+          }),
+      sleep: vi.fn(async () => {}),
+      agora: () => AGORA,
+    };
+    return { d, registra };
+  }
+
+  it("contato que nunca falou com a empresa, com o teto batido: barrado (é 1ª mensagem)", async () => {
+    const { d } = comTetosBatidos("nenhum");
+    const erro = (await segurarEnvioPorToken(d, alvoDoContato).catch((e: unknown) => e)) as ApiError;
+    expect(erro).toBeInstanceOf(ApiError);
+    expect(erro.details).toMatchObject({ motivo: "teto_diario" });
+  });
+
+  it("contato novo (sem contact_id), com o teto batido: barrado", async () => {
+    const { d } = comTetosBatidos("conversou");
+    const erro = await segurarEnvioPorToken(d, {
+      organizationId: ORG,
+      channelSessionId: SESSAO,
+      requestId: "r",
+    }).catch((e: unknown) => e);
+    expect(erro).toBeInstanceOf(ApiError);
+  });
+
+  it("aviso ao Miguel / resposta (a pessoa já escreveu): sai fora de qualquer teto e não gasta saldo", async () => {
+    const { d, registra } = comTetosBatidos("conversou");
+    const segurado = await segurarEnvioPorToken(d, alvoDoContato);
+    expect(segurado).toEqual({ channelSessionId: SESSAO, foraDoTeto: true });
+    await registrarEnvioPorToken(d, ORG, segurado, "sent");
+    expect(registra).toHaveBeenCalledWith(ORG, SESSAO, AGORA, { foraDoTeto: true });
+  });
+
+  it("conversa que já tem mensagem do cliente: resposta sai e não gasta saldo", async () => {
+    const { d, registra } = comTetosBatidos("conversou");
+    const segurado = await segurarEnvioPorToken(d, entrada);
+    expect(segurado).toEqual({ channelSessionId: SESSAO, foraDoTeto: true });
+    await registrarEnvioPorToken(d, ORG, segurado, "sent");
+    expect(registra).toHaveBeenCalledWith(ORG, SESSAO, AGORA, { foraDoTeto: true });
+  });
+
+  it("só nós escrevemos (follow-up): conta no teto PRÓPRIO, não no da 1ª mensagem", async () => {
+    const { d, registra } = comTetosBatidos("so_enviamos");
+    // follow-ups do dia já em 60: barrado pelo teto próprio.
+    const erro = await segurarEnvioPorToken(d, entrada).catch((e: unknown) => e);
+    expect(erro).toBeInstanceOf(ApiError);
+
+    // com folga no teto do follow-up, sai mesmo com a 1ª mensagem em 20/20 e grava a marca certa.
+    d.pacing.decide = async (_o, _s, agora, opcoes) =>
+      decidirEspacamento({
+        agora,
+        estado: { lastSentAt: null, sentToday: 20, followupsToday: 5, numberActivatedAt: null },
+        throttleMs: 1_200,
+        jitterMaxMs: 0,
+        timezone: "America/Sao_Paulo",
+        warmupDailyCaps: PACING_DEFAULTS.warmupDailyCaps,
+        crmDailyLimit: null,
+        foraDoTeto: opcoes?.foraDoTeto === true,
+        retomada: opcoes?.retomada === true,
+      });
+    const segurado = await segurarEnvioPorToken(d, entrada);
+    expect(segurado).toEqual({ channelSessionId: SESSAO, retomada: true });
+    await registrarEnvioPorToken(d, ORG, segurado, "sent");
+    expect(registra).toHaveBeenCalledWith(ORG, SESSAO, AGORA, { retomada: true });
+  });
+
+  it("o espaçamento entre mensagens continua valendo para quem está fora do teto", async () => {
+    const { d } = comTetosBatidos("conversou");
+    d.pacing.decide = async (_o, _s, agora, opcoes) =>
+      decidirEspacamento({
+        agora,
+        estado: {
+          lastSentAt: new Date(AGORA.getTime() - 100),
+          sentToday: 20,
+          followupsToday: 60,
+          numberActivatedAt: null,
+        },
+        throttleMs: 1_200,
+        jitterMaxMs: 0,
+        timezone: "America/Sao_Paulo",
+        warmupDailyCaps: PACING_DEFAULTS.warmupDailyCaps,
+        crmDailyLimit: null,
+        foraDoTeto: opcoes?.foraDoTeto === true,
+      });
+    await segurarEnvioPorToken(d, entrada);
+    expect(d.sleep).toHaveBeenCalledWith(1_100);
+  });
+
+  it("sem como classificar, ou se a leitura falha: conta no teto da 1ª mensagem (falha fechada)", async () => {
+    for (const modo of ["ausente", "falha"] as const) {
+      const { d } = comTetosBatidos(modo);
+      const erro = await segurarEnvioPorToken(d, entrada).catch((e: unknown) => e);
+      expect(erro).toBeInstanceOf(ApiError);
+    }
+  });
+
+  it("1ª mensagem que passou pelo freio é registrada SEM marca (gasta o saldo dela)", async () => {
+    const { d, registra } = comTetosBatidos("nenhum");
+    d.pacing.decide = async () => ({ liberado: true });
+    const segurado = await segurarEnvioPorToken(d, entrada);
+    await registrarEnvioPorToken(d, ORG, segurado, "sent");
+    expect(registra).toHaveBeenCalledWith(ORG, SESSAO, AGORA);
   });
 });

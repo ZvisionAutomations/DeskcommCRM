@@ -158,6 +158,12 @@ export interface GateContext {
      * só distingue resposta de retomada por follow-up.
      */
     resposta?: boolean;
+    /**
+     * Este envio é FOLLOW-UP (retomada de conversa existente)? Fica fora do teto
+     * do dia como a resposta (decisão de 30/10), mas lê a janela de DISPARO — ver
+     * `PacingInput.retomada`. Omitido = conta no teto.
+     */
+    retomada?: boolean;
   };
   spinning: {
     knobs: SpinningKnobs;
@@ -874,6 +880,7 @@ export const pacingGate: Gate = {
       crmDailyLimit: ctx.pacing.crmDailyLimit,
       banRisk,
       resposta: ctx.pacing.resposta,
+      retomada: ctx.pacing.retomada,
       rng: ctx.pacing.rng,
     });
     if (!decision.allow) {
@@ -1122,6 +1129,12 @@ export interface RunBeforeSendArgs {
    * todo chamador anterior à 0495 no comportamento antigo.
    */
   resposta?: boolean;
+  /**
+   * Este envio é FOLLOW-UP (`followup-turn.ts`)? Não gasta nem é barrado pelo teto
+   * do dia (decisão de 30/10: o teto conta só a 1ª mensagem a pessoa nova); segue
+   * na janela de disparo e no espaçamento. OMITIDO = conta no teto.
+   */
+  retomada?: boolean;
   now: Date;
   /** injeções de teste (jitter determinístico + espera sem relógio real). */
   rng?: () => number;
@@ -1515,6 +1528,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
         crmDailyLimit: args.crmDailyLimit,
         rng: args.rng,
         ...(args.resposta !== undefined ? { resposta: args.resposta } : {}),
+        ...(args.retomada !== undefined ? { retomada: args.retomada } : {}),
       },
       spinning: { knobs: spinningKnobs, window },
       ...(args.enforceSpinning === false ? { spinningEnforced: false as const } : {}),
@@ -1631,6 +1645,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
     if (outcome.kind === 'sent') {
       await recordSend(client, args.tenantId, args.channelSessionId, args.now, {
         resposta: tipoDeEnvio(args.resposta) === 'resposta',
+        retomada: args.retomada === true,
       });
       // Simetria com o gate desarmado: quem não é julgado pela janela não entra
       // nela. Ver `GateContext.spinningEnforced`.

@@ -168,6 +168,9 @@ export const crmStartConversationAndSend: McpToolDefinition<typeof inputShape> =
       organizationId: ctx.organizationId,
       channelSessionId: input.channel_session_id,
       requestId: ctx.requestId,
+      // Contato que já está na base e já trocou mensagem não é pessoa nova: o
+      // envio fica fora do teto do dia (só a 1ª mensagem a quem nunca falou conta).
+      contactId: candidato,
     });
 
     // Referencia a mesma origem autorizada que `open-with-contact` usa —

@@ -412,10 +412,23 @@ describe("enviarTextoFixoPendente · ritmo do canal", () => {
     expect(ledgerInserts).toHaveLength(0);
   });
 
-  it("número novo que já bateu o teto de 20/dia: adia por daily_cap", async () => {
+  it("número novo com o teto da 1ª mensagem batido (20/dia): follow-up SAI (teto próprio é 60)", async () => {
     decidir.mockResolvedValue({ permite: true, motivo: "autorizado" });
     // `number_activated_at` nulo = idade 0 = o degrau mais conservador.
     CONFIG.ritmo.doDia = 20;
+
+    const enviados = await comRelogoEm("2026-10-15T15:00:00Z", () =>
+      enviarTextoFixoPendente(admin()),
+    );
+
+    expect(enviados).toBe(1);
+    expect(sendMessageHandler).toHaveBeenCalled();
+  });
+
+  it("número novo que já bateu o teto PRÓPRIO do follow-up (60/dia): adia por daily_cap", async () => {
+    decidir.mockResolvedValue({ permite: true, motivo: "autorizado" });
+    // `number_activated_at` nulo = idade 0 = o degrau mais conservador (20 x 3).
+    CONFIG.ritmo.doDia = 60;
 
     const enviados = await comRelogoEm("2026-10-15T15:00:00Z", () =>
       enviarTextoFixoPendente(admin()),
@@ -509,11 +522,11 @@ describe("enviarTextoFixoPendente · mídia com legenda (#2734)", () => {
     expect(ledgerInserts).toHaveLength(0);
   });
 
-  it("imagem com o número no teto diário: NÃO sai, adia por daily_cap", async () => {
+  it("imagem com o número no teto próprio do follow-up: NÃO sai, adia por daily_cap", async () => {
     decidir.mockResolvedValue({ permite: true, motivo: "autorizado" });
     comMidia("https://cdn.exemplo.com/oferta.png");
-    // `number_activated_at` nulo = idade 0 = o degrau mais conservador (20/dia).
-    CONFIG.ritmo.doDia = 20;
+    // `number_activated_at` nulo = idade 0 = o degrau mais conservador (20 x 3 = 60/dia).
+    CONFIG.ritmo.doDia = 60;
 
     const enviados = await comRelogoEm("2026-10-15T15:00:00Z", () =>
       enviarTextoFixoPendente(admin()),

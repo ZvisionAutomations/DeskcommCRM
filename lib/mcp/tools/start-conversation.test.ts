@@ -123,6 +123,8 @@ describe("crm_start_conversation_and_send — freio anti-ban do número", () => 
       organizationId: ORG_ID,
       channelSessionId: SESSION_ID,
       requestId: "req-1",
+      // o contato de destino segue junto: é ele que separa 1ª mensagem de quem já está na base
+      contactId: CONTACT_ID,
     });
     expect(mockedSegurar.mock.invocationCallOrder[0]!).toBeLessThan(
       mockedOpen.mock.invocationCallOrder[0]!,

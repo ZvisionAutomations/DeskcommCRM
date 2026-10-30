@@ -223,7 +223,7 @@ async function enviaPorWhatsApp(
   // Mesma disciplina do aviso de caso: o envio entra no ledger, que é quem
   // cobra o teto diário e o espaçamento da próxima rodada.
   const { criarPacingDoCanal } = await import("@/lib/agent-engine/pacing/ledger-supabase");
-  await (await criarPacingDoCanal(ctx.admin)).registraEnvio(ctx.organizationId, canal.id, agora);
+  await (await criarPacingDoCanal(ctx.admin, { foraDoTeto: true })).registraEnvio(ctx.organizationId, canal.id, agora);
 
   return { type: TIPO, status: "success", detail: { reason: "whatsapp_enviado", canal: "whatsapp" } };
 }
@@ -241,7 +241,7 @@ async function decideEspera(ctx: ActionCtx): Promise<string | null> {
   const canal = await canalDaEquipe(ctx.admin, ctx.organizationId, numero.channel_session_id);
   if (canal === null || (await motivoDeBloqueioDoCanal(canal)) !== null) return null;
   const { criarPacingDoCanal } = await import("@/lib/agent-engine/pacing/ledger-supabase");
-  const pacing = await criarPacingDoCanal(ctx.admin);
+  const pacing = await criarPacingDoCanal(ctx.admin, { foraDoTeto: true });
   const decisao = await pacing.decide(ctx.organizationId, canal.id, new Date());
   if (decisao.liberado) return null;
   return decisao.liberaEm.toISOString();

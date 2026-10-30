@@ -1299,6 +1299,10 @@ async function sendFixedOutbound(
     body,
     optedOutThisTurn,
     crmDailyLimit: null,
+    // Follow-up retoma conversa que já existe: não é a 1ª mensagem a pessoa nova,
+    // então não gasta nem é barrado pelo teto do dia (decisão de 30/10). Janela de
+    // disparo e espaçamento continuam — `resposta` segue omitido de propósito.
+    retomada: true,
     now: clock(),
     sleep: deps.sleep,
     lgpd: context.lgpd,

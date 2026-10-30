@@ -120,7 +120,7 @@ export async function POST(_req: NextRequest): Promise<Response> {
       // consulta — o client é o de service role, e a organização vem da sessão.
       db: createSupabaseAvisoDb(admin),
       transporte: await criarTransporteDoAviso(admin),
-      pacing: await criarPacingDoCanal(admin),
+      pacing: await criarPacingDoCanal(admin, { foraDoTeto: true }),
       clock: () => new Date(),
       urlPublica: env.NEXT_PUBLIC_APP_URL,
     },

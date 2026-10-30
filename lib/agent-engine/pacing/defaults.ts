@@ -10,6 +10,14 @@
  * a cadeia de envio lê por query direta e injeta em `decidePacing` (`crmDailyLimit`).
  */
 
+/**
+ * Follow-up (decisão de 30/10): nos primeiros 15 dias do número ele tem teto
+ * próprio de 3x o warm-up do dia; do 15º dia em diante é livre. Resposta e aviso
+ * à equipe nunca têm teto.
+ */
+export const FOLLOWUP_TETO_FOLGADO_ATE_DIAS = 15;
+export const FOLLOWUP_MULTIPLO_DO_WARMUP = 3;
+
 /** Degrau de warm-up: a partir de `minAgeDays` de idade do número vale `cap` envios/dia; `cap: null` = formado (sem cap de warm-up — resta só o limite do CRM). */
 export interface WarmupStep {
   minAgeDays: number;

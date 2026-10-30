@@ -65607,3 +65607,13 @@ alter table public.pacing_ledger
   add column if not exists resposta boolean not null default false;
 comment on column public.pacing_ledger.resposta is
   'true = resposta a quem escreveu: vale para o espaçamento, não para o teto do dia (warm-up/daily_message_limit), que conta só disparos (9050).';
+
+-- ---- pacing_ledger.retomada (migration 9051) ----
+-- O follow-up tem teto próprio (3x o warm-up nos 15 primeiros dias do número) e
+-- não gasta o da 1ª mensagem. O porquê inteiro está no cabeçalho da migration.
+--
+-- Não cria função, então pode ficar depois da VARREDURA anon.
+alter table public.pacing_ledger
+  add column if not exists retomada boolean not null default false;
+comment on column public.pacing_ledger.retomada is
+  'true = follow-up (retomada de conversa): conta no teto PROPRIO do follow-up, nao no da 1a mensagem (9051).';

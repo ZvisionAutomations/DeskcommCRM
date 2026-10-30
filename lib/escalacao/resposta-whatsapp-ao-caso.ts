@@ -216,7 +216,7 @@ async function enviarConfirmacao(
       telefone,
     );
     if (!destino) return;
-    const pacing = await criarPacingDoCanal(admin);
+    const pacing = await criarPacingDoCanal(admin, { foraDoTeto: true });
     const decisao = await pacing.decide(entrada.organizationId, entrada.channelSessionId, agora);
     if (!decisao.liberado) return;
     const frases = {

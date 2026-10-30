@@ -91,7 +91,7 @@ export async function POST(_req: NextRequest): Promise<Response> {
     {
       db: avisoDb,
       transporte: await criarTransporteDoAviso(admin),
-      pacing: await criarPacingDoCanal(admin),
+      pacing: await criarPacingDoCanal(admin, { foraDoTeto: true }),
       clock: () => new Date(),
       urlPublica: env.NEXT_PUBLIC_APP_URL,
     },

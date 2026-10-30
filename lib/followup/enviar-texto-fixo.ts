@@ -90,7 +90,7 @@ export async function enviarTextoFixoPendente(
   const ponte = ponteSupabase(admin);
   // Um adapter para o drain inteiro: `criarPacingDoCanal` só monta o objeto (as
   // leituras moram em `decide`), e refazê-lo por job não compraria nada.
-  const ritmoDoCanal = await criarPacingDoCanal(admin);
+  const ritmoDoCanal = await criarPacingDoCanal(admin, { retomada: true });
   for (const job of jobs ?? []) {
     const payload = (job.payload ?? {}) as FollowupJobRequest["payload"];
     const body = payload.fixed_body;

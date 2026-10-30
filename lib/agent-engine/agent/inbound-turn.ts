@@ -2109,6 +2109,16 @@ export function eTurnoDeResposta(job: Pick<JobRow, 'kind'>): boolean {
   return job.kind === 'inbound_turn' || job.kind === 'case_reply_turn';
 }
 
+/**
+ * O turno é FOLLOW-UP (retomada de conversa existente)? Decisão de 30/10: o teto do
+ * dia conta só a 1ª mensagem a pessoa nova, então o follow-up não gasta nem é
+ * barrado por ele. Não muda a janela: retomar continua lendo a de DISPARO
+ * (`eTurnoDeResposta` segue falso para este kind).
+ */
+export function eTurnoDeRetomada(job: Pick<JobRow, 'kind'>): boolean {
+  return job.kind === 'followup_turn';
+}
+
 function turnoVaiFalarComOLead(job: JobRow): boolean {
   if (job.kind === 'inbound_turn' || job.kind === 'case_reply_turn') return true;
   if (job.kind !== 'followup_turn') return false;
@@ -3707,6 +3717,7 @@ async function executarTurnoDoAgente(
           optedOutThisTurn,
           // Resposta do turno, mesmo sendo template: lê a janela de resposta (0495).
           resposta: eTurnoDeResposta(liveJob()),
+          retomada: eTurnoDeRetomada(liveJob()),
           crmDailyLimit: null,
           now: clock(),
           sleep: deps.sleep,
@@ -4044,6 +4055,7 @@ async function executarTurnoDoAgente(
             // janela de RESPOSTA (0495). `followup_turn` retoma conversa parada e
             // continua na janela de DISPARO.
             resposta: eTurnoDeResposta(liveJob()),
+            retomada: eTurnoDeRetomada(liveJob()),
             // ponytail: channel_sessions.daily_message_limit do CRM ainda não é lido
             // no runtime — null cai nos degraus de warm-up (conservadores). Injetar
             // aqui quando o drain expuser o limite da sessão.
@@ -5663,6 +5675,7 @@ async function executarTurnoDoAgente(
               // Sai no MESMO turno da resposta: sem isto, às 3h com a janela de
               // resposta aberta, o agente responde e a pergunta do roteiro é vetada.
               resposta: eTurnoDeResposta(liveJob()),
+              retomada: eTurnoDeRetomada(liveJob()),
               crmDailyLimit: null,
               // A pergunta repete por design (foi feita e não respondida); o
               // anti-blast vetaria justamente o que esta trava garante. Mesmo

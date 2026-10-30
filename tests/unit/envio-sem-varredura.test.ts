@@ -135,19 +135,26 @@ describe("store.message busca pela PK e só cai no metadata se a PK não achar",
 });
 
 describe("pacing: sem varrer o histórico do número", () => {
-  it("dois subselects pelo índice, mesmo lastSentAt/sentToday", async () => {
+  it("subselects pelo índice, mesmo lastSentAt/sentToday (e o follow-up à parte)", async () => {
     const ultimo = new Date("2026-10-02T13:00:00Z");
-    const db = fakeDb([[{ last_sent_at: ultimo, sent_today: "3" }]]);
+    const db = fakeDb([[{ last_sent_at: ultimo, sent_today: "3", followups_today: "4" }]]);
     const estado = await loadPacingState(db, "org", "sess", {
       now: new Date("2026-10-02T15:00:00Z"),
       timezone: "America/Sao_Paulo",
       numberActivatedAt: null,
     });
-    expect(estado).toEqual({ lastSentAt: ultimo, sentToday: 3, numberActivatedAt: null });
+    expect(estado).toEqual({
+      lastSentAt: ultimo,
+      sentToday: 3,
+      followupsToday: 4,
+      numberActivatedAt: null,
+    });
     const sql = (db.sqls[0] ?? "").replace(/\s+/g, " ");
     expect(sql).not.toMatch(/filter|max\(/i);
     expect(sql).toContain("order by sent_at desc limit 1");
-    expect(sql).toMatch(/and sent_at >= \$3\) as sent_today/);
+    // A 1ª mensagem não conta resposta nem follow-up (9050/9051); o follow-up tem conta própria.
+    expect(sql).toMatch(/and sent_at >= \$3 and not resposta and not retomada\) as sent_today/);
+    expect(sql).toMatch(/and sent_at >= \$3 and retomada\) as followups_today/);
     // Meia-noite de São Paulo = 03:00Z: o início do dia vem do `now` injetado.
     expect(db.params[0]).toEqual(["org", "sess", new Date("2026-10-02T03:00:00Z")]);
   });

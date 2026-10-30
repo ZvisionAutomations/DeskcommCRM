@@ -49,7 +49,7 @@ export const avisoDeCasoAoSuporteHandler: EventHandler = {
           // conhece provedor. O import é tardio para o topo não arrastar os
           // adapters para dentro do bundle de quem só registra o handler.
           transporte: await criarTransporteDoAviso(admin),
-          pacing: await criarPacingDoCanal(admin),
+          pacing: await criarPacingDoCanal(admin, { foraDoTeto: true }),
           clock: () => new Date(),
           urlPublica: env.NEXT_PUBLIC_APP_URL,
           origemDoDreno,

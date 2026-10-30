@@ -38,14 +38,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { knobsDoCanal } from "@/lib/automation/janela-do-canal";
 import { logger } from "@/lib/logger";
 
-import { dayStartInTz, warmupCapFor } from "./engine";
+import { dayStartInTz, tetoDoFollowup, warmupCapFor } from "./engine";
 
 /** O que o ledger responde sobre este número. */
 export interface EstadoDoPacing {
   /** Último envio deste número, em qualquer dia — a base do espaçamento. */
   lastSentAt: Date | null;
-  /** Envios deste número desde a meia-noite LOCAL do tenant. */
+  /**
+   * 1ªs mensagens deste número desde a meia-noite LOCAL do tenant. Resposta
+   * (`resposta`) e follow-up (`retomada`) não entram.
+   */
   sentToday: number;
+  /** Follow-ups do mesmo dia local — o teto PRÓPRIO do follow-up. */
+  followupsToday?: number;
   /** `channel_knobs.number_activated_at`; `null` = idade 0 (o degrau mais conservador). */
   numberActivatedAt: Date | null;
 }
@@ -86,6 +91,15 @@ export async function lerEstadoDoPacing(
     .eq("organization_id", organizationId)
     .eq("channel_session_id", channelSessionId)
     .eq("resposta", false)
+    .eq("retomada", false)
+    .gte("sent_at", inicioDoDia.toISOString());
+
+  const followupsDoDia = await admin
+    .from("pacing_ledger")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organizationId)
+    .eq("channel_session_id", channelSessionId)
+    .eq("retomada", true)
     .gte("sent_at", inicioDoDia.toISOString());
 
   const knobs = await admin
@@ -102,6 +116,7 @@ export async function lerEstadoDoPacing(
   for (const [qual, erro] of [
     ["ultimo envio", ultimo.error],
     ["contagem do dia", doDia.error],
+    ["contagem de follow-ups do dia", followupsDoDia.error],
     ["knobs do numero", knobs.error],
   ] as const) {
     if (erro) {
@@ -121,8 +136,26 @@ export async function lerEstadoDoPacing(
   return {
     lastSentAt: sentAt ? new Date(sentAt) : null,
     sentToday: doDia.count ?? 0,
+    followupsToday: followupsDoDia.count ?? 0,
     numberActivatedAt: ativado ? new Date(ativado) : null,
   };
+}
+
+/**
+ * Como o envio entra na conta do teto do dia (decisão de 30/10: o teto mede só a
+ * 1ª mensagem a pessoa nova).
+ *
+ * - `foraDoTeto: true` = resposta a quem escreveu ou aviso à equipe: nenhum teto
+ *   se aplica e nenhum é gasto (coluna `resposta`);
+ * - `retomada: true` = follow-up: teto PRÓPRIO (3x o warm-up do dia nos primeiros
+ *   15 dias do número, livre depois), contado à parte (coluna `retomada`);
+ * - nada = 1ª mensagem: teto normal.
+ *
+ * O espaçamento entre mensagens vale nos três casos.
+ */
+export interface OpcoesDoPacing {
+  foraDoTeto?: boolean;
+  retomada?: boolean;
 }
 
 /**
@@ -137,11 +170,15 @@ export async function registrarEnvioNoLedger(
   organizationId: string,
   channelSessionId: string,
   quando: Date = new Date(),
+  opcoes: OpcoesDoPacing = {},
 ): Promise<void> {
   const { error } = await admin.from("pacing_ledger").insert({
     organization_id: organizationId,
     channel_session_id: channelSessionId,
     sent_at: quando.toISOString(),
+    // Omitir as duas = 1ª mensagem (conta no teto), como sempre foi.
+    ...(opcoes.foraDoTeto === true ? { resposta: true } : {}),
+    ...(opcoes.foraDoTeto !== true && opcoes.retomada === true ? { retomada: true } : {}),
   });
   if (error) {
     logger.warn("[pacing] envio não contabilizado no ledger", {
@@ -161,6 +198,10 @@ export async function registrarEnvioNoLedger(
  * que só volta a enviar amanhã.
  */
 export function decidirEspacamento(entrada: {
+  /** Resposta ou aviso à equipe: nenhum teto se aplica, só o espaçamento. */
+  foraDoTeto?: boolean;
+  /** Follow-up: teto próprio (3x o warm-up nos 15 primeiros dias), à parte da 1ª mensagem. */
+  retomada?: boolean;
   agora: Date;
   estado: EstadoDoPacing;
   throttleMs: number;
@@ -186,7 +227,17 @@ export function decidirEspacamento(entrada: {
   );
   const cap = caps.length > 0 ? Math.min(...caps) : null;
 
-  if (cap !== null && estado.sentToday >= cap) {
+  const capDoEnvio =
+    entrada.foraDoTeto === true
+      ? null
+      : entrada.retomada === true
+        ? tetoDoFollowup(Math.floor(idadeDias), entrada.warmupDailyCaps)
+        : cap;
+  const feitosNaConta =
+    entrada.retomada === true && entrada.foraDoTeto !== true
+      ? (estado.followupsToday ?? 0)
+      : estado.sentToday;
+  if (capDoEnvio !== null && feitosNaConta >= capDoEnvio) {
     // O contador zera na meia-noite LOCAL do tenant — é exatamente esse o
     // instante em que este número volta a poder enviar. Um `+24h` cru daria uma
     // hora arbitrária e faria o aviso sair no meio da madrugada seguinte.
@@ -213,9 +264,19 @@ export function decidirEspacamento(entrada: {
  * Existe para o chamador não ter de saber a ordem das três leituras — e para a
  * REGRA (`decidirEspacamento`) continuar testável sem banco nenhum.
  */
-export async function criarPacingDoCanal(admin: SupabaseClient) {
+export async function criarPacingDoCanal(admin: SupabaseClient, padrao: OpcoesDoPacing = {}) {
   return {
-    async decide(organizationId: string, channelSessionId: string, agora: Date) {
+    /**
+     * `opcoes` por chamada vence o `padrao` do adapter. Quem só manda aviso à
+     * equipe ou follow-up cria o adapter com `{ foraDoTeto: true }`; quem
+     * classifica envio a envio (envio por token) passa a opção em cada chamada.
+     */
+    async decide(
+      organizationId: string,
+      channelSessionId: string,
+      agora: Date,
+      opcoes: OpcoesDoPacing = padrao,
+    ) {
       const knobs = await knobsDoCanal(admin, organizationId, channelSessionId);
       const estado = await lerEstadoDoPacing(admin, organizationId, channelSessionId, {
         agora,
@@ -234,12 +295,19 @@ export async function criarPacingDoCanal(admin: SupabaseClient) {
         jitterMaxMs: knobs.jitterMaxMs,
         timezone: knobs.timezone,
         warmupDailyCaps: knobs.warmupDailyCaps,
+        foraDoTeto: opcoes.foraDoTeto === true,
+        retomada: opcoes.retomada === true,
         crmDailyLimit:
           (data as { daily_message_limit?: number | null } | null)?.daily_message_limit ?? null,
       });
     },
-    async registraEnvio(organizationId: string, channelSessionId: string, quando: Date) {
-      await registrarEnvioNoLedger(admin, organizationId, channelSessionId, quando);
+    async registraEnvio(
+      organizationId: string,
+      channelSessionId: string,
+      quando: Date,
+      opcoes: OpcoesDoPacing = padrao,
+    ) {
+      await registrarEnvioNoLedger(admin, organizationId, channelSessionId, quando, opcoes);
     },
   };
 }

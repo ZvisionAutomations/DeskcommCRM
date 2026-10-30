@@ -34,6 +34,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   criarPacingDoCanal,
   type DecisaoDeEspacamento,
+  type OpcoesDoPacing,
 } from "@/lib/agent-engine/pacing/ledger-supabase";
 import { ApiError } from "@/lib/api/types";
 import { capabilitiesOf, DEFAULT_CHANNEL_PROVIDER } from "@/lib/channels/capabilities";
@@ -54,20 +55,72 @@ export interface DepsDoRitmo {
   lerCanalDaConversa(organizationId: string, conversationId: string): Promise<CanalDaConversa | null>;
   lerCanalDaSessao?(organizationId: string, channelSessionId: string): Promise<CanalDaConversa | null>;
   pacing: {
-    decide(organizationId: string, channelSessionId: string, agora: Date): Promise<DecisaoDeEspacamento>;
-    registraEnvio(organizationId: string, channelSessionId: string, quando: Date): Promise<void>;
+    decide(
+      organizationId: string,
+      channelSessionId: string,
+      agora: Date,
+      opcoes?: OpcoesDoPacing,
+    ): Promise<DecisaoDeEspacamento>;
+    registraEnvio(
+      organizationId: string,
+      channelSessionId: string,
+      quando: Date,
+      opcoes?: OpcoesDoPacing,
+    ): Promise<void>;
   };
+  /**
+   * O que já houve entre a empresa e o destino (conversa ou contato), fora as
+   * mensagens de sistema. É o que separa a 1ª mensagem a pessoa nova — a ÚNICA que
+   * conta no teto do dia (decisão de 30/10) — do resto:
+   * - `nenhum`: nunca trocaram mensagem → 1ª mensagem, conta no teto;
+   * - `conversou`: a pessoa já escreveu (ou é a equipe) → resposta/aviso, fora de teto;
+   * - `so_enviamos`: só nós escrevemos, ela nunca respondeu → follow-up, teto próprio.
+   * Ausente = `nenhum`: o envio conta no teto, o comportamento de antes e a direção
+   * segura. Se a leitura FALHAR, também conta.
+   */
+  historicoDoAlvo?(
+    organizationId: string,
+    alvo: { conversationId?: string | null; contactId?: string | null },
+  ): Promise<HistoricoDoAlvo>;
   sleep(ms: number): Promise<void>;
   agora(): Date;
 }
 
+export type HistoricoDoAlvo = "nenhum" | "conversou" | "so_enviamos";
+
 /** Entrada aceita por `segurarEnvioPorToken`: por conversa existente ou direto pela sessão do canal. */
 export type EntradaDoFreio =
   | { organizationId: string; conversationId: string; requestId: string }
-  | { organizationId: string; channelSessionId: string; requestId: string };
+  | {
+      organizationId: string;
+      channelSessionId: string;
+      requestId: string;
+      /** Contato de destino, quando já se sabe (abrir conversa): permite separar 1ª mensagem de quem já está na base. */
+      contactId?: string | null;
+    };
 
 /** O que `segurarEnvioPorToken` devolve e `registrarEnvioPorToken` consome. */
-export type EnvioSegurado = { channelSessionId: string } | null;
+export type EnvioSegurado =
+  | ({ channelSessionId: string } & OpcoesDoPacing)
+  | null;
+
+/** Como este envio entra na conta do teto. Sem classificar (ou falha) = 1ª mensagem: conta. */
+async function opcoesDoEnvio(deps: DepsDoRitmo, entrada: EntradaDoFreio): Promise<OpcoesDoPacing> {
+  if (!deps.historicoDoAlvo) return {};
+  const alvo =
+    "conversationId" in entrada
+      ? { conversationId: entrada.conversationId }
+      : { contactId: entrada.contactId ?? null };
+  if (!("conversationId" in alvo ? alvo.conversationId : alvo.contactId)) return {};
+  try {
+    const historico = await deps.historicoDoAlvo(entrada.organizationId, alvo);
+    if (historico === "conversou") return { foraDoTeto: true };
+    if (historico === "so_enviamos") return { retomada: true };
+    return {};
+  } catch {
+    return {};
+  }
+}
 
 function temRiscoDeBan(provider: string | null): boolean {
   try {
@@ -98,13 +151,20 @@ export async function segurarEnvioPorToken(
   if (!canal || !temRiscoDeBan(canal.provider)) return null;
 
   const agora = deps.agora();
-  const decisao = await deps.pacing.decide(entrada.organizationId, canal.channelSessionId, agora);
-  if (decisao.liberado) return { channelSessionId: canal.channelSessionId };
+  const opcoes = await opcoesDoEnvio(deps, entrada);
+  const classificado = opcoes.foraDoTeto === true || opcoes.retomada === true;
+  // Só carrega a marca quando há uma: quem não tem como classificar (ou
+  // classificou "1ª mensagem") segue exatamente como antes, sem opção nenhuma.
+  const segurado: EnvioSegurado = { channelSessionId: canal.channelSessionId, ...opcoes };
+  const decisao = classificado
+    ? await deps.pacing.decide(entrada.organizationId, canal.channelSessionId, agora, opcoes)
+    : await deps.pacing.decide(entrada.organizationId, canal.channelSessionId, agora);
+  if (decisao.liberado) return segurado;
 
   const esperaMs = Math.max(0, decisao.liberaEm.getTime() - agora.getTime());
   if (decisao.motivo === "espacamento" && esperaMs <= ESPERA_MAXIMA_MS) {
     await deps.sleep(esperaMs);
-    return { channelSessionId: canal.channelSessionId };
+    return segurado;
   }
 
   const retryAfterSeconds = Math.max(1, Math.ceil(esperaMs / 1000));
@@ -130,6 +190,13 @@ export async function registrarEnvioPorToken(
   status: string,
 ): Promise<void> {
   if (!segurado || status === "failed") return;
+  if (segurado.foraDoTeto === true || segurado.retomada === true) {
+    await deps.pacing.registraEnvio(organizationId, segurado.channelSessionId, deps.agora(), {
+      ...(segurado.foraDoTeto === true ? { foraDoTeto: true } : {}),
+      ...(segurado.retomada === true ? { retomada: true } : {}),
+    });
+    return;
+  }
   await deps.pacing.registraEnvio(organizationId, segurado.channelSessionId, deps.agora());
 }
 
@@ -168,6 +235,29 @@ export async function depsDoRitmo(admin: SupabaseClient): Promise<DepsDoRitmo> {
       };
     },
     pacing: await criarPacingDoCanal(admin),
+    async historicoDoAlvo(organizationId, alvo) {
+      // Um `exists` por direção, do mais forte para o mais fraco: quem já escreveu
+      // uma vez é "conversou" para sempre; só se não houver inbound é que se
+      // pergunta pelo que NÓS mandamos.
+      const existe = async (direcao: "inbound" | "outbound"): Promise<boolean> => {
+        let consulta = admin
+          .from("messages")
+          .select("id")
+          .eq("organization_id", organizationId)
+          .eq("direction", direcao)
+          .neq("type", "system")
+          .limit(1);
+        if (alvo.conversationId) consulta = consulta.eq("conversation_id", alvo.conversationId);
+        else if (alvo.contactId) consulta = consulta.eq("contact_id", alvo.contactId);
+        else return false;
+        const { data, error } = await consulta.maybeSingle();
+        if (error) throw new Error(error.message);
+        return data !== null;
+      };
+      if (await existe("inbound")) return "conversou";
+      if (await existe("outbound")) return "so_enviamos";
+      return "nenhum";
+    },
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     agora: () => new Date(),
   };

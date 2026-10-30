@@ -69,7 +69,7 @@ export const avisoDePropostaNoWhatsAppHandler: EventHandler = {
             marcaDaOrganizacao: (orgId) => doCaso.marcaDaOrganizacao(orgId),
           },
           transporte: await criarTransporteDoAviso(admin),
-          pacing: await criarPacingDoCanal(admin),
+          pacing: await criarPacingDoCanal(admin, { foraDoTeto: true }),
           clock: () => new Date(),
           urlPublica: env.NEXT_PUBLIC_APP_URL,
           origemDoDreno,

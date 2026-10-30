@@ -199,19 +199,27 @@ export async function loadPacingState(
   // WHERE, a agregação lia o histórico inteiro do número a cada envio, sob o lock.
   // Assim os dois descem por `idx_pacing_ledger_session (org, sessão, sent_at desc)`:
   // a última linha e só as linhas do dia. Mesmo molde de `ledger-supabase.ts`.
-  const { rows } = await db.query<{ last_sent_at: Date | null; sent_today: string }>(
+  const { rows } = await db.query<{
+    last_sent_at: Date | null;
+    sent_today: string;
+    followups_today: string;
+  }>(
     `select (select sent_at from pacing_ledger
               where organization_id = $1 and channel_session_id = $2
               order by sent_at desc limit 1) as last_sent_at,
             (select count(*) from pacing_ledger
               where organization_id = $1 and channel_session_id = $2
-                and sent_at >= $3 and not resposta) as sent_today`,
+                and sent_at >= $3 and not resposta and not retomada) as sent_today,
+            (select count(*) from pacing_ledger
+              where organization_id = $1 and channel_session_id = $2
+                and sent_at >= $3 and retomada) as followups_today`,
     [tenantId, channelSessionId, dayStart],
   );
   const row = rows[0];
   return {
     lastSentAt: row?.last_sent_at ?? null,
     sentToday: Number(row?.sent_today ?? 0),
+    followupsToday: Number(row?.followups_today ?? 0),
     numberActivatedAt: input.numberActivatedAt,
   };
 }
@@ -219,20 +227,22 @@ export async function loadPacingState(
 /**
  * Registra um envio efetivado — chamado pela cadeia de envio (F2-13) após o accept do CRM.
  *
- * `resposta: true` marca a linha como resposta a quem escreveu: ela segue valendo
- * para o espaçamento (`lastSentAt`), mas não gasta o teto do dia (`sentToday`),
- * que mede só quantas pessoas o número aborda. Omitir = disparo (conta).
+ * `resposta: true` (resposta a quem escreveu, aviso à equipe) marca a linha como fora
+ * de qualquer teto; `retomada: true` (follow-up) a marca na conta do teto PRÓPRIO do
+ * follow-up. As duas seguem valendo para o espaçamento (`lastSentAt`) e nenhuma
+ * entra em `sentToday`, que mede só a 1ª mensagem a pessoa nova. Omitir os dois =
+ * 1ª mensagem (conta).
  */
 export async function recordSend(
   db: Queryable,
   tenantId: string,
   channelSessionId: string,
   sentAt: Date = new Date(),
-  opts: { resposta?: boolean } = {},
+  opts: { resposta?: boolean; retomada?: boolean } = {},
 ): Promise<void> {
   await db.query(
-    `insert into pacing_ledger (organization_id, channel_session_id, sent_at, resposta)
-     values ($1, $2, $3, $4)`,
-    [tenantId, channelSessionId, sentAt, opts.resposta === true],
+    `insert into pacing_ledger (organization_id, channel_session_id, sent_at, resposta, retomada)
+     values ($1, $2, $3, $4, $5)`,
+    [tenantId, channelSessionId, sentAt, opts.resposta === true, opts.retomada === true],
   );
 }

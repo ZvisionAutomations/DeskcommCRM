@@ -38,7 +38,7 @@ export async function criarDepsDoAvisoDeAgendamento(): Promise<Omit<AvisoDeAgend
   return {
     db: createSupabaseAvisoDeAgendamentoDb(admin, createSupabaseAvisoDb(admin)),
     transporte: await criarTransporteDoAviso(admin),
-    pacing: await criarPacingDoCanal(admin),
+    pacing: await criarPacingDoCanal(admin, { foraDoTeto: true }),
     clock: () => new Date(),
     audita: (entrada) => {
       // Fire-and-forget, como todo audit do produto.
